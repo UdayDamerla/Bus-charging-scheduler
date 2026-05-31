@@ -3,6 +3,7 @@ Streamlit UI for Bus Charging Scheduler
 
 Simple web interface to:
 - Pick a scenario
+- Adjust weights
 - See the input data
 - View the charging schedules
 """
@@ -14,9 +15,10 @@ import os
 # Add src directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
-from scheduler import schedule_scenario, load_scenario
+from scheduler import BusChargingScheduler, load_scenario
 import pandas as pd
 import json
+import copy
 
 
 # Page config
@@ -53,11 +55,52 @@ selected_scenario = st.sidebar.selectbox(
 # Load scenario
 scenario, route_config = load_scenario(selected_scenario)
 
+# Weight adjustment sliders
 st.sidebar.markdown("---")
-st.sidebar.header("Weights")
-st.sidebar.markdown(f"**Individual Bus**: {scenario['weights']['individual_bus']}")
-st.sidebar.markdown(f"**Operator Balance**: {scenario['weights']['operator_balance']}")
-st.sidebar.markdown(f"**Overall Efficiency**: {scenario['weights']['overall_efficiency']}")
+st.sidebar.header("Adjust Weights")
+st.sidebar.markdown("*Change weights to see how the schedule adapts*")
+
+w1 = st.sidebar.slider(
+    "Individual Bus",
+    min_value=0.0,
+    max_value=5.0,
+    value=float(scenario['weights']['individual_bus']),
+    step=0.5,
+    help="Higher = prioritize reducing worst-case individual wait"
+)
+
+w2 = st.sidebar.slider(
+    "Operator Balance",
+    min_value=0.0,
+    max_value=5.0,
+    value=float(scenario['weights']['operator_balance']),
+    step=0.5,
+    help="Higher = prioritize fairness across operators"
+)
+
+w3 = st.sidebar.slider(
+    "Overall Efficiency",
+    min_value=0.0,
+    max_value=5.0,
+    value=float(scenario['weights']['overall_efficiency']),
+    step=0.5,
+    help="Higher = prioritize FCFS order for throughput"
+)
+
+# Create modified scenario with adjusted weights
+scenario_copy = copy.deepcopy(scenario)
+scenario_copy['weights'] = {
+    'individual_bus': w1,
+    'operator_balance': w2,
+    'overall_efficiency': w3
+}
+
+# Show if weights changed from default
+default_weights = scenario['weights']
+if (w1 != default_weights['individual_bus'] or
+    w2 != default_weights['operator_balance'] or
+    w3 != default_weights['overall_efficiency']):
+    st.sidebar.info("⚡ Weights modified from scenario defaults")
 
 # Tabs
 tab1, tab2, tab3, tab4 = st.tabs([
@@ -67,9 +110,10 @@ tab1, tab2, tab3, tab4 = st.tabs([
     "📊 Metrics"
 ])
 
-# Run scheduler
-with st.spinner("Computing optimal schedule..."):
-    result = schedule_scenario(selected_scenario)
+# Run scheduler with adjusted weights
+with st.spinner("Computing schedule..."):
+    scheduler = BusChargingScheduler(scenario_copy, route_config)
+    result = scheduler.schedule()
 
 # Tab 1: Scenario Input
 with tab1:
@@ -108,6 +152,16 @@ with tab1:
         'departure_time': 'Departure Time'
     })
     st.dataframe(buses_df, use_container_width=True, hide_index=True)
+
+    # Show current weights
+    st.subheader("Current Weights")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Individual Bus", w1)
+    with col2:
+        st.metric("Operator Balance", w2)
+    with col3:
+        st.metric("Overall Efficiency", w3)
 
 # Tab 2: Per-Bus Schedule
 with tab2:
@@ -225,25 +279,37 @@ with tab4:
 
         st.subheader("Wait Time Distribution by Operator")
 
-        # Calculate operator-level stats
-        operator_stats = {}
-        for bus in result['buses']:
-            op = bus['operator']
-            if op not in operator_stats:
-                operator_stats[op] = []
-            operator_stats[op].append(bus['total_wait_time_minutes'])
+        # Use the per-operator metrics from the result if available
+        if 'per_operator' in metrics:
+            operator_summary = []
+            for op, stats in metrics['per_operator'].items():
+                operator_summary.append({
+                    'Operator': op.upper(),
+                    'Buses': stats['bus_count'],
+                    'Total Wait (min)': stats['total_wait'],
+                    'Avg Wait (min)': f"{stats['avg_wait']:.1f}",
+                    'Max Wait (min)': stats['max_wait']
+                })
+            st.dataframe(pd.DataFrame(operator_summary), use_container_width=True, hide_index=True)
+        else:
+            # Fallback: calculate from bus data
+            operator_stats = {}
+            for bus in result['buses']:
+                op = bus['operator']
+                if op not in operator_stats:
+                    operator_stats[op] = []
+                operator_stats[op].append(bus['total_wait_time_minutes'])
 
-        operator_summary = []
-        for op, waits in operator_stats.items():
-            operator_summary.append({
-                'Operator': op.upper(),
-                'Buses': len(waits),
-                'Total Wait (min)': sum(waits),
-                'Avg Wait (min)': f"{sum(waits) / len(waits):.1f}",
-                'Max Wait (min)': max(waits)
-            })
-
-        st.dataframe(pd.DataFrame(operator_summary), use_container_width=True, hide_index=True)
+            operator_summary = []
+            for op, waits in operator_stats.items():
+                operator_summary.append({
+                    'Operator': op.upper(),
+                    'Buses': len(waits),
+                    'Total Wait (min)': sum(waits),
+                    'Avg Wait (min)': f"{sum(waits) / len(waits):.1f}",
+                    'Max Wait (min)': max(waits)
+                })
+            st.dataframe(pd.DataFrame(operator_summary), use_container_width=True, hide_index=True)
 
         st.subheader("Station Utilization")
 
@@ -256,7 +322,6 @@ with tab4:
                 'Station': station,
                 'Buses Charged': len(queue),
                 'Total Charging Time (min)': total_charging_time,
-                'Avg Time Between Buses (min)': f"{(24*60) / len(queue):.1f}" if len(queue) > 0 else "N/A"
             })
 
         st.dataframe(pd.DataFrame(station_util), use_container_width=True, hide_index=True)
@@ -264,7 +329,7 @@ with tab4:
 # Footer
 st.markdown("---")
 st.markdown("""
-**About**: This scheduler uses constraint programming (Google OR-Tools CP-SAT) to optimize bus charging schedules
-while respecting hard constraints (battery range, charger availability) and balancing soft objectives (individual delays,
-operator fairness, overall efficiency).
+**How it works**: This scheduler uses a greedy simulation with weighted priority.
+When multiple buses contend for the same charger, the weights determine who goes first.
+Adjust the sliders in the sidebar to see how different weight settings affect the schedule.
 """)
