@@ -55,15 +55,18 @@ class PriorityBusScheduler(BusChargingScheduler):
     This is the ONLY change needed - override one method.
     """
 
-    def _calculate_priority(self, bus, arrival_time, current_wait, operator_cumulative_wait):
+    def _calculate_priority(self, bus_id, operator, arrival_time, charger_free_time, operator_total_waits):
         # Call parent method to get base priority
         base_priority = super()._calculate_priority(
-            bus, arrival_time, current_wait, operator_cumulative_wait
+            bus_id, operator, arrival_time, charger_free_time, operator_total_waits
         )
+
+        # Look up the bus to check if it has priority
+        bus = next((b for b in self.buses if b['id'] == bus_id), None)
 
         # Priority buses get a huge boost (subtract 10000 from their score)
         # Lower score = higher priority, so this makes them go first
-        if bus.get('priority', False):
+        if bus and bus.get('priority', False):
             return base_priority - 10000
 
         return base_priority
@@ -72,11 +75,12 @@ class PriorityBusScheduler(BusChargingScheduler):
 print("Code change:")
 print("""
 class PriorityBusScheduler(BusChargingScheduler):
-    def _calculate_priority(self, bus, arrival_time, current_wait, operator_cumulative_wait):
+    def _calculate_priority(self, bus_id, operator, arrival_time, charger_free_time, operator_total_waits):
         base_priority = super()._calculate_priority(...)
+        bus = next((b for b in self.buses if b['id'] == bus_id), None)
 
         # Priority buses get a huge boost
-        if bus.get('priority', False):
+        if bus and bus.get('priority', False):
             return base_priority - 10000
 
         return base_priority

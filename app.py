@@ -16,6 +16,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
 from scheduler import BusChargingScheduler, load_scenario
+from custom_scheduler import CustomRulesScheduler
 import pandas as pd
 import json
 import copy
@@ -102,17 +103,135 @@ if (w1 != default_weights['individual_bus'] or
     w3 != default_weights['overall_efficiency']):
     st.sidebar.info("⚡ Weights modified from scenario defaults")
 
+# Custom Rules Section
+st.sidebar.markdown("---")
+st.sidebar.header("🎯 Custom Rules")
+st.sidebar.markdown("*Add special rules to the scheduler*")
+
+with st.sidebar.expander("Configure Custom Rules", expanded=False):
+    # Priority Buses Rule
+    st.markdown("**Priority Buses**")
+    priority_enabled = st.checkbox(
+        "Enable priority buses",
+        value=False,
+        help="Specific buses get to charge first"
+    )
+
+    priority_buses = []
+    priority_boost = 5000
+    if priority_enabled:
+        # Get all bus IDs
+        all_bus_ids = [bus['id'] for bus in scenario['buses']]
+        priority_buses = st.multiselect(
+            "Select priority buses",
+            options=all_bus_ids,
+            help="These buses will charge before others"
+        )
+        priority_boost = st.slider(
+            "Priority boost",
+            min_value=1000,
+            max_value=10000,
+            value=5000,
+            step=1000,
+            help="Higher = stronger priority"
+        )
+
+    st.markdown("---")
+
+    # Time-of-Day Rule
+    st.markdown("**Time-of-Day Priority**")
+    time_enabled = st.checkbox(
+        "Enable off-peak bonus",
+        value=False,
+        help="Buses arriving in off-peak hours get priority"
+    )
+
+    off_peak_start = 0
+    off_peak_end = 6
+    off_peak_boost = 1000
+    if time_enabled:
+        off_peak_start = st.slider(
+            "Off-peak start (hour)",
+            min_value=0,
+            max_value=23,
+            value=0,
+            help="Start of off-peak period"
+        )
+        off_peak_end = st.slider(
+            "Off-peak end (hour)",
+            min_value=0,
+            max_value=23,
+            value=6,
+            help="End of off-peak period"
+        )
+        off_peak_boost = st.slider(
+            "Off-peak boost",
+            min_value=500,
+            max_value=5000,
+            value=1000,
+            step=500,
+            help="Priority bonus for off-peak arrivals"
+        )
+
+    st.markdown("---")
+
+    # Express Service Rule
+    st.markdown("**Express Service**")
+    express_enabled = st.checkbox(
+        "Enable express priority",
+        value=False,
+        help="Buses marked as 'express' charge first"
+    )
+
+    express_boost = 3000
+    if express_enabled:
+        express_boost = st.slider(
+            "Express boost",
+            min_value=1000,
+            max_value=10000,
+            value=3000,
+            step=1000,
+            help="Priority for express buses"
+        )
+        st.info("💡 Add 'service_type': 'express' to bus data in JSON")
+
+# Build custom rules dict
+custom_rules = {
+    'priority_buses_enabled': priority_enabled,
+    'priority_bus_list': priority_buses,
+    'priority_boost': priority_boost,
+    'time_of_day_enabled': time_enabled,
+    'off_peak_start': off_peak_start,
+    'off_peak_end': off_peak_end,
+    'off_peak_boost': off_peak_boost,
+    'express_service_enabled': express_enabled,
+    'express_boost': express_boost,
+}
+
+# Show active rules indicator
+active_rules_count = sum([priority_enabled, time_enabled, express_enabled])
+if active_rules_count > 0:
+    st.sidebar.success(f"✓ {active_rules_count} custom rule(s) active")
+
 # Tabs
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📋 Input",
     "🚌 Per-Bus",
     "⚡ Per-Station",
-    "📊 Metrics"
+    "📊 Metrics",
+    "🎯 Custom Rules"
 ])
 
-# Run scheduler with adjusted weights
+# Run scheduler with adjusted weights and custom rules
+# Create a unique key based on weights to force recomputation
+weights_key = f"{w1}_{w2}_{w3}_{active_rules_count}"
+
 with st.spinner("Computing schedule..."):
-    scheduler = BusChargingScheduler(scenario_copy, route_config)
+    # Use custom scheduler if any rules are active
+    if active_rules_count > 0:
+        scheduler = CustomRulesScheduler(scenario_copy, route_config, custom_rules)
+    else:
+        scheduler = BusChargingScheduler(scenario_copy, route_config)
     result = scheduler.schedule()
 
 # Tab 1: Scenario Input
@@ -162,6 +281,10 @@ with tab1:
         st.metric("Operator Balance", w2)
     with col3:
         st.metric("Overall Efficiency", w3)
+
+    # Add explanation if Scenario 1
+    if selected_scenario == 1:
+        st.info("ℹ️ **Note:** Scenario 1 has evenly-spaced buses (no contention), so weight changes have minimal effect. Try Scenario 2 to see weights in action!")
 
 # Tab 2: Per-Bus Schedule
 with tab2:
@@ -325,6 +448,120 @@ with tab4:
             })
 
         st.dataframe(pd.DataFrame(station_util), use_container_width=True, hide_index=True)
+
+# Tab 5: Custom Rules Info
+with tab5:
+    st.header("🎯 Custom Rules Configuration")
+
+    if active_rules_count == 0:
+        st.info("👈 No custom rules active. Configure rules in the sidebar to see them in action!")
+
+    else:
+        st.success(f"✅ {active_rules_count} custom rule(s) currently active")
+
+        st.markdown("---")
+        st.subheader("Active Rules")
+
+        if priority_enabled:
+            st.markdown("### 🎯 Priority Buses")
+            st.markdown(f"**Boost:** {priority_boost} (lower priority score)")
+            if priority_buses:
+                st.markdown(f"**Priority buses:** {', '.join(priority_buses)}")
+
+                # Show impact on priority buses
+                priority_waits = []
+                for bus in result['buses']:
+                    if bus['bus_id'] in priority_buses:
+                        priority_waits.append({
+                            'Bus ID': bus['bus_id'],
+                            'Operator': bus['operator'].upper(),
+                            'Total Wait': f"{bus['total_wait_time_minutes']} min"
+                        })
+
+                if priority_waits:
+                    st.markdown("**Priority bus wait times:**")
+                    st.dataframe(pd.DataFrame(priority_waits), use_container_width=True, hide_index=True)
+            else:
+                st.warning("⚠️ Rule enabled but no buses selected")
+
+        if time_enabled:
+            st.markdown("### ⏰ Time-of-Day Priority")
+            st.markdown(f"**Off-peak hours:** {off_peak_start}:00 - {off_peak_end}:00")
+            st.markdown(f"**Boost:** {off_peak_boost} (lower priority score)")
+            st.markdown("Buses arriving during off-peak hours get priority to encourage load shifting.")
+
+        if express_enabled:
+            st.markdown("### 🚄 Express Service")
+            st.markdown(f"**Boost:** {express_boost} (lower priority score)")
+            st.markdown("Buses marked with `service_type: 'express'` get priority charging.")
+
+            # Check if any buses have express service
+            express_buses = [bus for bus in scenario_copy['buses'] if bus.get('service_type') == 'express']
+            if express_buses:
+                st.markdown(f"**Express buses found:** {len(express_buses)}")
+                express_ids = [b['id'] for b in express_buses]
+                st.markdown(f"{', '.join(express_ids)}")
+            else:
+                st.info("💡 No buses marked as 'express' in current scenario. Add `\"service_type\": \"express\"` to bus data in JSON.")
+
+        st.markdown("---")
+        st.subheader("How Custom Rules Work")
+
+        st.markdown("""
+**Custom rules adjust the priority score** when multiple buses are waiting for a charger:
+
+1. **Base Priority** is calculated from the three weights (Individual Bus, Operator Balance, Overall Efficiency)
+2. **Custom Rules** then add/subtract from that score
+3. **Lower score = higher priority** (charges first)
+
+**Example:**
+- Bus A arrives first (base priority: 1000)
+- Bus B arrives later but is marked as priority (base priority: 1500)
+- Priority boost of 5000 is applied to Bus B: 1500 - 5000 = **-3500**
+- Bus B charges first because -3500 < 1000
+
+This means custom rules can override the base weights when needed, but still respect the weight-based prioritization within each rule category.
+        """)
+
+        st.markdown("---")
+        st.subheader("Adding Your Own Rules")
+
+        st.markdown("""
+The custom rules framework is extensible. To add a new rule:
+
+**1. Add rule logic** to `src/custom_scheduler.py`:
+```python
+def _apply_my_rule(self, priority, bus):
+    if not self.custom_rules.get('my_rule_enabled', False):
+        return priority
+
+    boost = self.custom_rules.get('my_rule_boost', 1000)
+
+    # Your logic here
+    if some_condition(bus):
+        return priority - boost
+
+    return priority
+```
+
+**2. Add UI controls** in the sidebar (around line 100 in `app.py`):
+```python
+my_rule_enabled = st.checkbox("Enable my rule")
+if my_rule_enabled:
+    my_rule_boost = st.slider("Boost", 1000, 10000, 2000)
+```
+
+**3. Add to custom_rules dict** (around line 185):
+```python
+custom_rules = {
+    ...
+    'my_rule_enabled': my_rule_enabled,
+    'my_rule_boost': my_rule_boost,
+}
+```
+
+That's it! Your rule is now active and configurable through the UI.
+        """)
 
 # Footer
 st.markdown("---")
